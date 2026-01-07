@@ -144,18 +144,21 @@ if st.session_state.authenticated:
     with tabs[0]:
         st.header("B0 Field Homogeneity")
     
-    # Upload T1 DICOM stack
-    t1_files = st.file_uploader(
+    # Optional upload
+    uploaded_files = st.file_uploader(
         "Upload T1 DICOM stack (T1 series)", 
         type=["dcm"], 
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key="B0_uploader"
     )
 
-    if st.button("Compute B0 Metrics"):
-        if not t1_files:
+    # Only display message if button pressed
+    compute_clicked = st.button("Compute B0 Metrics")
+    
+    if compute_clicked:
+        if not uploaded_files:
             st.warning("Please upload a T1 DICOM stack before computing metrics.")
         else:
-            # Placeholder metrics (replace with real computation later)
             metrics_store['B0'] = {
                 'Mean_ppm': 0.1,
                 'SD_ppm': 0.05,
@@ -163,6 +166,7 @@ if st.session_state.authenticated:
                 'Status': "PASS" if 0.12 <= ACTION_LIMITS['B0_ppm'] else "FAIL"
             }
             st.success(f"Computed B0 metrics: {metrics_store['B0']}")
+
 
     # ------------------- Uniformity -------------------
     with tabs[1]:
