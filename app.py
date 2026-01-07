@@ -31,7 +31,7 @@ ACTION_LIMITS = {
 
 USERS = {
     "physicist1": hashlib.sha256("password1".encode()).hexdigest(),
-    "physicist2": hashlib.sha256("password2".encode()).hexdigest()
+    "physicist2": hashlib.sha256("password2".encode()).hexdigest(),
     "nicos": hashlib.sha256("1234".encode()).hexdigest()
 }
 
