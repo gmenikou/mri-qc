@@ -54,7 +54,7 @@ if not st.session_state.auth:
             st.session_state.auth = True
             st.session_state.user = u
             st.success(f"Logged in as {u}")
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Invalid credentials")
     st.stop()
