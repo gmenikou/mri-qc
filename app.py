@@ -1,100 +1,50 @@
-# app.py
+# ===================== IMPORTS =====================
 import streamlit as st
-import os
+import numpy as np
 import pandas as pd
-import hashlib
+import pydicom
+import os, hashlib, subprocess
 from datetime import datetime
+from scipy.ndimage import binary_fill_holes
+from skimage.filters import threshold_otsu
+from skimage.measure import label, regionprops
+import matplotlib.pyplot as plt
 from fpdf import FPDF
 
-# ======================= CONFIG =======================
+# ===================== CONFIG =====================
 DATA_PATH = "./ACR_QC_Data"
-REPORTS_PATH = os.path.join(DATA_PATH, "Reports")
-os.makedirs(REPORTS_PATH, exist_ok=True)
+REPORT_PATH = os.path.join(DATA_PATH, "Reports")
+os.makedirs(REPORT_PATH, exist_ok=True)
+
+USERS = {
+    "physicist1": hashlib.sha256("acr123".encode()).hexdigest(),
+    "physicist2": hashlib.sha256("acr456".encode()).hexdigest()
+}
 
 ACTION_LIMITS = {
     "B0_ppm": 0.5,
-    "Uniformity_percent": 87,
-    "HCR_lp": 1.0,
-    "SliceThickness_mm": 1.0,
-    "Distortion_mm": 1.0,
-    "LowContrast_min": 3,
-    "SNR_min": 40
+    "Uniformity": 87,
+    "HCR": 1.0,
+    "LowContrast": 3,
+    "SNR": 40,
+    "SliceThickness": 1.0,
+    "Distortion": 1.0
 }
 
 ALL_TESTS = [
-    "B0",
-    "Uniformity",
-    "HCR",
-    "SliceThickness",
-    "Distortion",
-    "LowContrast",
-    "SNR_Ghosting",
-    "CF_Gain"
+    "B0", "Uniformity", "HCR", "LowContrast",
+    "SNR", "SliceThickness", "Distortion", "CF_Gain"
 ]
 
-USERS = {
-    "physicist": hashlib.sha256("acr123".encode()).hexdigest()
-}
+# ===================== AUTH =====================
+def check_password(u, p):
+    return u in USERS and hashlib.sha256(p.encode()).hexdigest() == USERS[u]
 
-# ======================= HELPERS =======================
-def check_password(user, pw):
-    return user in USERS and hashlib.sha256(pw.encode()).hexdigest() == USERS[user]
-
-def overall_status(pass_t1, pass_t2):
-    return "PASS" if pass_t1 and pass_t2 else "FAIL"
-
-def save_csv(test, data):
-    folder = os.path.join(DATA_PATH, test)
-    os.makedirs(folder, exist_ok=True)
-    df = pd.DataFrame([data])
-    path = os.path.join(folder, f"{datetime.now().date()}_{test}.csv")
-    df.to_csv(path, index=False)
-
-def generate_pdf(metrics, filename):
-    pdf = FPDF()
-    pdf.set_auto_page_break(True, 15)
-
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 12, "ACR MRI QC Report", ln=True, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, "Scanner: Philips 1.5T", ln=True)
-    pdf.cell(0, 8, "Phantom: 30 cm Sphere", ln=True)
-    pdf.cell(0, 8, f"Date: {datetime.now().date()}", ln=True)
-
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Summary", ln=True)
-
-    for test in ALL_TESTS:
-        pdf.set_font("Arial", "", 12)
-        if test in metrics:
-            pdf.cell(0, 8, f"{test}: {metrics[test]['Status']}", ln=True)
-        else:
-            pdf.cell(0, 8, f"{test}: NOT PERFORMED", ln=True)
-
-    for test in ALL_TESTS:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, test, ln=True)
-        pdf.set_font("Arial", "", 12)
-        if test in metrics:
-            for k, v in metrics[test].items():
-                pdf.cell(0, 8, f"{k}: {v}", ln=True)
-        else:
-            pdf.cell(0, 8, "Test not performed", ln=True)
-
-    path = os.path.join(REPORTS_PATH, filename)
-    pdf.output(path)
-    return path
-
-# ======================= SESSION =======================
 if "auth" not in st.session_state:
     st.session_state.auth = False
 if "metrics" not in st.session_state:
     st.session_state.metrics = {}
 
-# ======================= LOGIN ========================
 if not st.session_state.auth:
     st.title("ACR MRI QC Login")
     u = st.text_input("Username")
@@ -102,147 +52,185 @@ if not st.session_state.auth:
     if st.button("Login"):
         if check_password(u, p):
             st.session_state.auth = True
-            st.success("Logged in")
+            st.session_state.user = u
+            st.success(f"Logged in as {u}")
+            st.experimental_rerun()
         else:
             st.error("Invalid credentials")
     st.stop()
 
-# ======================= TABS =========================
+# ===================== SIDEBAR =====================
+st.sidebar.markdown("### Session")
+st.sidebar.write(f"User: **{st.session_state.user}**")
+if st.sidebar.button("Logout"):
+    st.session_state.auth = False
+    st.session_state.metrics = {}
+    st.experimental_rerun()
+
+# ===================== TABS =====================
 tabs = st.tabs([
-    "B0 Homogeneity",
-    "Uniformity",
-    "HCR",
-    "Slice Thickness",
-    "Distortion",
-    "Low Contrast",
-    "SNR / Ghosting",
-    "Trend",
-    "PDF",
-    "Settings",
-    "CF / Gain"
+    "B0 Homogeneity", "Uniformity", "HCR",
+    "Low Contrast", "SNR / Ghosting",
+    "Slice Thickness", "Distortion",
+    "CF / Gain", "PDF Report"
 ])
 
-metrics = st.session_state.metrics
-
-# ======================= B0 ===========================
+# ==================================================
+# =============== B0 HOMOGENEITY ====================
+# ==================================================
 with tabs[0]:
     st.header("B0 Field Homogeneity (Dual-TE)")
-    st.info("Automatic dual-TE phase-based B0 mapping will be implemented here.")
-    st.warning("Currently placeholder – no computation yet.")
 
-# ======================= UNIFORMITY ===================
+    files = st.file_uploader(
+        "Upload dual-TE DICOM stack",
+        type=["dcm"],
+        accept_multiple_files=True
+    )
+
+    if st.button("Compute B0"):
+        if not files:
+            st.warning("Please upload DICOM files.")
+            st.stop()
+
+        # ---- Load and group by slice ----
+        slices = {}
+        for f in files:
+            d = pydicom.dcmread(f)
+            loc = round(float(d.SliceLocation), 2)
+            slices.setdefault(loc, []).append(d)
+
+        ppm_maps = []
+        max_ppm_slices = []
+
+        for loc, imgs in slices.items():
+            if len(imgs) != 2:
+                continue
+
+            d1, d2 = sorted(imgs, key=lambda x: x.EchoTime)
+            phase1 = d1.pixel_array.astype(float)
+            phase2 = d2.pixel_array.astype(float)
+
+            delta_phase = np.angle(np.exp(1j * (phase2 - phase1)))
+            delta_te = abs(d2.EchoTime - d1.EchoTime) / 1000
+            b0_hz = delta_phase / (2 * np.pi * delta_te)
+            ppm = b0_hz / d1.ImagingFrequency
+
+            # ---- Phantom mask ----
+            mag = np.abs(d1.pixel_array)
+            thresh = threshold_otsu(mag)
+            mask = mag > thresh
+            mask = binary_fill_holes(mask)
+
+            lbl = label(mask)
+            region = max(regionprops(lbl), key=lambda r: r.area)
+            rr, cc = region.coords.T
+            cy, cx = region.centroid
+            r = np.sqrt((rr-cy)**2 + (cc-cx)**2).max()
+            inner = ((np.indices(mask.shape)[0]-cy)**2 +
+                     (np.indices(mask.shape)[1]-cx)**2) <= (0.85*r)**2
+
+            ppm_roi = ppm[inner]
+            ppm_maps.append(ppm * inner)
+            max_ppm_slices.append(np.max(np.abs(ppm_roi)))
+
+        global_max = max(max_ppm_slices)
+        status = "PASS" if global_max <= ACTION_LIMITS["B0_ppm"] else "FAIL"
+
+        st.session_state.metrics["B0"] = {
+            "Max_ppm": round(global_max, 3),
+            "Status": status
+        }
+
+        st.success(f"Global max ppm: {global_max:.3f} → {status}")
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(ppm_maps[0], cmap="seismic")
+        plt.colorbar(im, label="ppm")
+        st.pyplot(fig)
+
+# ==================================================
+# =============== MANUAL T1 / T2 TESTS ==============
+# ==================================================
+def dual_input(test, limit, label):
+    st.subheader(test)
+    t1 = st.number_input(f"{label} T1", key=f"{test}_t1")
+    t2 = st.number_input(f"{label} T2", key=f"{test}_t2")
+    if st.button(f"Submit {test}"):
+        p1 = t1 >= limit
+        p2 = t2 >= limit
+        st.session_state.metrics[test] = {
+            "T1": t1, "T2": t2,
+            "Status": "PASS" if p1 and p2 else "FAIL"
+        }
+        st.success(st.session_state.metrics[test]["Status"])
+
 with tabs[1]:
-    st.header("Image Uniformity (T1 & T2)")
-    t1 = st.number_input("Uniformity T1 (%)", 0.0, 100.0)
-    t2 = st.number_input("Uniformity T2 (%)", 0.0, 100.0)
-    if st.button("Save Uniformity"):
-        p1 = t1 >= ACTION_LIMITS["Uniformity_percent"]
-        p2 = t2 >= ACTION_LIMITS["Uniformity_percent"]
-        metrics["Uniformity"] = {
-            "T1_%": t1,
-            "T2_%": t2,
-            "Status": overall_status(p1, p2)
-        }
-        save_csv("Uniformity", metrics["Uniformity"])
-        st.success(metrics["Uniformity"]["Status"])
+    dual_input("Uniformity", ACTION_LIMITS["Uniformity"], "Uniformity (%)")
 
-# ======================= HCR ==========================
 with tabs[2]:
-    st.header("High Contrast Resolution (T1 & T2)")
-    t1 = st.number_input("HCR T1 (lp/mm)", 0.0)
-    t2 = st.number_input("HCR T2 (lp/mm)", 0.0)
-    if st.button("Save HCR"):
-        p1 = t1 >= ACTION_LIMITS["HCR_lp"]
-        p2 = t2 >= ACTION_LIMITS["HCR_lp"]
-        metrics["HCR"] = {
-            "T1_lp": t1,
-            "T2_lp": t2,
-            "Status": overall_status(p1, p2)
-        }
-        save_csv("HCR", metrics["HCR"])
-        st.success(metrics["HCR"]["Status"])
+    dual_input("HCR", ACTION_LIMITS["HCR"], "Resolution (lp/mm)")
 
-# ======================= SLICE ========================
 with tabs[3]:
-    st.header("Slice Thickness")
-    v = st.number_input("Measured slice thickness (mm)", 0.0)
-    if st.button("Save Slice Thickness"):
-        metrics["SliceThickness"] = {
-            "Measured_mm": v,
-            "Status": "PASS" if abs(v - 5.0) <= ACTION_LIMITS["SliceThickness_mm"] else "FAIL"
-        }
-        save_csv("SliceThickness", metrics["SliceThickness"])
-        st.success(metrics["SliceThickness"]["Status"])
+    dual_input("LowContrast", ACTION_LIMITS["LowContrast"], "Objects visible")
 
-# ======================= DISTORT ======================
 with tabs[4]:
-    st.header("Geometric Distortion")
-    v = st.number_input("Max distortion (mm)", 0.0)
-    if st.button("Save Distortion"):
-        metrics["Distortion"] = {
-            "Max_mm": v,
-            "Status": "PASS" if v <= ACTION_LIMITS["Distortion_mm"] else "FAIL"
-        }
-        save_csv("Distortion", metrics["Distortion"])
-        st.success(metrics["Distortion"]["Status"])
+    dual_input("SNR", ACTION_LIMITS["SNR"], "SNR")
 
-# ======================= LOW CONTR ====================
+# ==================================================
+# =============== SINGLE INPUT TESTS ================
+# ==================================================
 with tabs[5]:
-    st.header("Low Contrast Detectability (T1 & T2)")
-    t1 = st.number_input("Objects visible T1", 0)
-    t2 = st.number_input("Objects visible T2", 0)
-    if st.button("Save Low Contrast"):
-        p1 = t1 >= ACTION_LIMITS["LowContrast_min"]
-        p2 = t2 >= ACTION_LIMITS["LowContrast_min"]
-        metrics["LowContrast"] = {
-            "T1_objects": t1,
-            "T2_objects": t2,
-            "Status": overall_status(p1, p2)
+    v = st.number_input("Slice thickness error (mm)")
+    if st.button("Submit"):
+        st.session_state.metrics["SliceThickness"] = {
+            "Error_mm": v,
+            "Status": "PASS" if abs(v) <= ACTION_LIMITS["SliceThickness"] else "FAIL"
         }
-        save_csv("LowContrast", metrics["LowContrast"])
-        st.success(metrics["LowContrast"]["Status"])
 
-# ======================= SNR ==========================
 with tabs[6]:
-    st.header("SNR / Ghosting (T1 & T2)")
-    t1 = st.number_input("SNR T1", 0.0)
-    t2 = st.number_input("SNR T2", 0.0)
-    if st.button("Save SNR"):
-        p1 = t1 >= ACTION_LIMITS["SNR_min"]
-        p2 = t2 >= ACTION_LIMITS["SNR_min"]
-        metrics["SNR_Ghosting"] = {
-            "T1_SNR": t1,
-            "T2_SNR": t2,
-            "Status": overall_status(p1, p2)
+    v = st.number_input("Max distortion (mm)")
+    if st.button("Submit"):
+        st.session_state.metrics["Distortion"] = {
+            "Error_mm": v,
+            "Status": "PASS" if v <= ACTION_LIMITS["Distortion"] else "FAIL"
         }
-        save_csv("SNR_Ghosting", metrics["SNR_Ghosting"])
-        st.success(metrics["SNR_Ghosting"]["Status"])
 
-# ======================= TREND ========================
 with tabs[7]:
-    st.header("Trend Analysis")
-    st.info("Historical trend plots from CSVs can be added here.")
+    cf = st.number_input("Center Frequency (MHz)")
+    gain = st.number_input("Gain")
+    if st.button("Submit"):
+        st.session_state.metrics["CF_Gain"] = {
+            "CF": cf, "Gain": gain, "Status": "N/A"
+        }
 
-# ======================= PDF ==========================
+# ==================================================
+# =================== PDF REPORT ===================
+# ==================================================
 with tabs[8]:
     st.header("Generate PDF Report")
+
     if st.button("Generate PDF"):
-        name = f"{datetime.now().date()}_ACR_QC_Report.pdf"
-        path = generate_pdf(metrics, name)
-        st.success(f"Saved to {path}")
-        st.download_button("Download PDF", open(path, "rb"), name)
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "ACR MRI QC Report", ln=True)
+        pdf.set_font("Arial", "", 12)
+        pdf.cell(0, 8, f"Date: {datetime.now().date()}", ln=True)
+        pdf.cell(0, 8, f"Performed by: {st.session_state.user}", ln=True)
+        pdf.ln(5)
 
-# ======================= SETTINGS =====================
-with tabs[9]:
-    st.header("Settings")
-    st.info("Manual measurements must follow ACR window/level guidance.")
+        for t in ALL_TESTS:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, t, ln=True)
+            pdf.set_font("Arial", "", 11)
+            if t in st.session_state.metrics:
+                for k, v in st.session_state.metrics[t].items():
+                    pdf.cell(0, 6, f"{k}: {v}", ln=True)
+            else:
+                pdf.cell(0, 6, "Not performed", ln=True)
+            pdf.ln(2)
 
-# ======================= CF ===========================
-with tabs[10]:
-    st.header("Center Frequency / Gain")
-    cf = st.number_input("Center Frequency (MHz)", 0.0)
-    gain = st.number_input("Receiver Gain", 0.0)
-    if st.button("Save CF/Gain"):
-        metrics["CF_Gain"] = {"CF": cf, "Gain": gain, "Status": "N/A"}
-        save_csv("CF_Gain", metrics["CF_Gain"])
-        st.success("Saved")
+        path = os.path.join(REPORT_PATH, f"ACR_QC_{datetime.now().date()}.pdf")
+        pdf.output(path)
+        st.success("PDF generated")
+        st.download_button("Download PDF", open(path, "rb"), file_name=os.path.basename(path))
