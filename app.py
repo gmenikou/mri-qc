@@ -118,18 +118,19 @@ if not st.session_state.authenticated:
     st.title("ACR QC Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if check_password(username,password):
+    login_clicked = st.button("Login")
+
+    if login_clicked:
+        if check_password(username, password):
             st.session_state.authenticated = True
             st.session_state.username = username
             st.session_state.user_repo_path = USER_REPOS.get(username, "./ACR_QC_Repo")
             st.success(f"Welcome, {username}!")
-            st.experimental_rerun()  # Force dashboard load immediately
         else:
             st.error("Incorrect username or password")
 
 # ------------------- Main App -------------------
-else:
+if st.session_state.authenticated:
     st.sidebar.success(f"Logged in as {st.session_state.username}")
     user_repo_path = st.session_state.user_repo_path
     os.makedirs(user_repo_path, exist_ok=True)
@@ -139,7 +140,7 @@ else:
         "Distortion","Low-Contrast","SNR/Ghosting","Trend","PDF","Settings","CF/Gain"
     ])
 
-    # ------------------- B0 -------------------
+    # ------------------- Example: B0 -------------------
     with tabs[0]:
         st.header("B0 Field Homogeneity")
         if 'B0' not in metrics_store:
