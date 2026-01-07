@@ -124,6 +124,7 @@ if not st.session_state.authenticated:
             st.session_state.username = username
             st.session_state.user_repo_path = USER_REPOS.get(username, "./ACR_QC_Repo")
             st.success(f"Welcome, {username}!")
+            st.experimental_rerun()  # Force dashboard load immediately
         else:
             st.error("Incorrect username or password")
 
