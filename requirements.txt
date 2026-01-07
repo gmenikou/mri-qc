@@ -3,3 +3,4 @@ pandas
 fpdf
 pydicom
 scikit-image
+matplotlib
