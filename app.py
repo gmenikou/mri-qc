@@ -142,9 +142,9 @@ if st.session_state.authenticated:
 
     # ------------------- Example: B0 -------------------
    with tabs[0]:
-    st.header("B0 Field Homogeneity")
-    t1_files = st.file_uploader("Upload T1 DICOM stack", type=["dcm"], accept_multiple_files=True)
-    if st.button("Compute B0 Metrics"):
+        st.header("B0 Field Homogeneity")
+        t1_files = st.file_uploader("Upload T1 DICOM stack", type=["dcm"], accept_multiple_files=True)
+        if st.button("Compute B0 Metrics"):
         metrics_store['B0'] = {
             'Mean_ppm':0.1, 'SD_ppm':0.05, 'PeakToPeak_ppm':0.12,
             'Status': "PASS" if 0.12 <= ACTION_LIMITS['B0_ppm'] else "FAIL"
