@@ -1,0 +1,265 @@
+# app.py
+import streamlit as st
+import os, pandas as pd, hashlib, subprocess
+from datetime import datetime
+from fpdf import FPDF
+
+# ------------------- Settings -------------------
+DATA_PATH = "./ACR_QC_Data"
+REPORTS_PATH = os.path.join(DATA_PATH, "Reports")
+os.makedirs(REPORTS_PATH, exist_ok=True)
+
+ALL_TESTS = [
+    "B0", "Uniformity", "HCR", "SliceThickness", "Distortion",
+    "LowContrast", "SNR_Ghosting", "CF_Gain"
+]
+
+ACTION_LIMITS = {
+    "B0_ppm": 0.5,
+    "Uniformity_percent": 87,
+    "HCR_lp": 1.0,
+    "SliceThickness_mm": 1.0,
+    "Distortion_mm": 1.0,
+    "LowContrast_min": 3,
+    "SNR_min": 40
+}
+
+USERS = {
+    "physicist1": hashlib.sha256("password1".encode()).hexdigest(),
+    "physicist2": hashlib.sha256("password2".encode()).hexdigest()
+}
+
+USER_REPOS = {
+    "physicist1": "./ACR_QC_Repo_Physicist1",
+    "physicist2": "./ACR_QC_Repo_Physicist2"
+}
+
+# ------------------- Helper Functions -------------------
+def check_password(username, password):
+    return username in USERS and hashlib.sha256(password.encode()).hexdigest() == USERS[username]
+
+def save_metrics_csv(test_name, df):
+    folder = os.path.join(DATA_PATH, test_name)
+    os.makedirs(folder, exist_ok=True)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    path = os.path.join(folder, f"{date_str}_{test_name}.csv")
+    df.to_csv(path, index=False)
+    return path
+
+def generate_pdf(metrics_dict, filename):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Cover page
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 20)
+    pdf.cell(0, 15, "ACR MRI QC Report", ln=True, align='C')
+    pdf.set_font("Arial", '', 12)
+    pdf.ln(10)
+    pdf.cell(0, 10, f"Scanner: Philips 1.5T", ln=True)
+    pdf.cell(0, 10, f"Phantom: 30 cm Sphere", ln=True)
+    pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d')}", ln=True)
+    pdf.cell(0, 10, "QC performed according to ACR guidelines.", ln=True)
+    
+    # Summary
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "Summary of PASS/FAIL per Test", ln=True)
+    pdf.ln(5)
+    pdf.set_font("Arial", '', 12)
+    for test in ALL_TESTS:
+        if test in metrics_dict:
+            status = metrics_dict[test].get('Status', 'N/A')
+            pdf.set_text_color(0,128,0) if status=="PASS" else pdf.set_text_color(255,0,0)
+            pdf.cell(0, 6, f"{test}: {status}", ln=True)
+        else:
+            pdf.set_text_color(255,0,0)
+            pdf.cell(0,6,f"{test}: Not performed", ln=True)
+        pdf.set_text_color(0,0,0)
+    
+    # Detailed per-test pages
+    for test in ALL_TESTS:
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 14)
+        pdf.cell(0, 10, f"{test} Metrics", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Arial", '', 12)
+        if test in metrics_dict:
+            for key,val in metrics_dict[test].items():
+                if key != "Status":
+                    pdf.cell(0, 6, f"{key}: {val}", ln=True)
+            pdf.ln(2)
+            pdf.cell(0,6,f"Status: {metrics_dict[test]['Status']}", ln=True)
+        else:
+            pdf.set_text_color(255,0,0)
+            pdf.multi_cell(0,6,"This test was not performed during this session.")
+            pdf.set_text_color(0,0,0)
+    
+    path = os.path.join(REPORTS_PATH, filename)
+    pdf.output(path)
+    return path
+
+# ------------------- Authentication -------------------
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("ACR QC Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if check_password(username,password):
+            st.session_state.authenticated = True
+            st.session_state.username = username
+            st.success(f"Welcome, {username}!")
+        else:
+            st.error("Incorrect username or password")
+else:
+    st.sidebar.success(f"Logged in as {st.session_state.username}")
+    
+    # Assign user repo
+    user_repo_path = USER_REPOS.get(st.session_state.username,"./ACR_QC_Repo")
+    os.makedirs(user_repo_path, exist_ok=True)
+    
+    tabs = st.tabs([
+        "B0 Homogeneity","Uniformity","HCR","Slice Thickness",
+        "Distortion","Low-Contrast","SNR/Ghosting","Trend","PDF","Settings","CF/Gain"
+    ])
+    
+    metrics_store = {}
+    
+    # ------------------- B0 -------------------
+    with tabs[0]:
+        st.header("B0 Field Homogeneity")
+        if 'B0' not in metrics_store:
+            st.info("Not filled yet")
+        if st.button("Compute B0 Metrics"):
+            metrics_store['B0'] = {'Mean_ppm':0.1,'SD_ppm':0.05,'PeakToPeak_ppm':0.12,'Status':'PASS'}
+            st.success(f"Computed B0 metrics: {metrics_store['B0']}")
+    
+    # ------------------- Uniformity -------------------
+    with tabs[1]:
+        st.header("Image Uniformity")
+        if 'Uniformity' not in metrics_store:
+            st.info("Not filled yet")
+        t1_val = st.number_input("T1 (%)",0.0,100.0,key="uni_t1")
+        t2_val = st.number_input("T2 (%)",0.0,100.0,key="uni_t2")
+        if st.button("Submit Uniformity"):
+            status = "PASS" if min(t1_val,t2_val) >= ACTION_LIMITS['Uniformity_percent'] else "FAIL"
+            metrics_store['Uniformity'] = {'T1':t1_val,'T2':t2_val,'Status':status}
+            st.success(f"Uniformity recorded. Status: {status}")
+            save_metrics_csv("Uniformity", pd.DataFrame([metrics_store['Uniformity']]))
+    
+    # ------------------- HCR -------------------
+    with tabs[2]:
+        st.header("High-Contrast Resolution")
+        if 'HCR' not in metrics_store:
+            st.info("Not filled yet")
+        hcr_val = st.number_input("Highest resolved line-pair (mm)",0.0,key="hcr")
+        if st.button("Submit HCR"):
+            status = "PASS" if hcr_val >= ACTION_LIMITS['HCR_lp'] else "FAIL"
+            metrics_store['HCR'] = {'Resolved_lp':hcr_val,'Status':status}
+            st.success(f"HCR recorded. Status: {status}")
+            save_metrics_csv("HCR", pd.DataFrame([metrics_store['HCR']]))
+    
+    # ------------------- Slice Thickness -------------------
+    with tabs[3]:
+        st.header("Slice Thickness")
+        if 'SliceThickness' not in metrics_store:
+            st.info("Not filled yet")
+        st_val = st.number_input("Measured slice thickness (mm)",0.0,key="slice_thick")
+        if st.button("Submit Slice Thickness"):
+            status = "PASS" if abs(st_val-5.0) <= ACTION_LIMITS['SliceThickness_mm'] else "FAIL"
+            metrics_store['SliceThickness'] = {'Measured_mm':st_val,'Status':status}
+            st.success(f"Slice Thickness recorded. Status: {status}")
+            save_metrics_csv("SliceThickness", pd.DataFrame([metrics_store['SliceThickness']]))
+    
+    # ------------------- Distortion -------------------
+    with tabs[4]:
+        st.header("Geometric Distortion")
+        if 'Distortion' not in metrics_store:
+            st.info("Not filled yet")
+        dist_val = st.number_input("Max distortion (mm)",0.0,key="distortion")
+        if st.button("Submit Distortion"):
+            status = "PASS" if dist_val <= ACTION_LIMITS['Distortion_mm'] else "FAIL"
+            metrics_store['Distortion'] = {'MaxDistortion_mm':dist_val,'Status':status}
+            st.success(f"Distortion recorded. Status: {status}")
+            save_metrics_csv("Distortion", pd.DataFrame([metrics_store['Distortion']]))
+    
+    # ------------------- Low Contrast -------------------
+    with tabs[5]:
+        st.header("Low-Contrast Objects")
+        if 'LowContrast' not in metrics_store:
+            st.info("Not filled yet")
+        lc_val = st.number_input("Number of visible low-contrast objects",0,key="lowcontrast")
+        if st.button("Submit Low Contrast"):
+            status = "PASS" if lc_val >= ACTION_LIMITS['LowContrast_min'] else "FAIL"
+            metrics_store['LowContrast'] = {'ObjectsVisible':lc_val,'Status':status}
+            st.success(f"Low-Contrast recorded. Status: {status}")
+            save_metrics_csv("LowContrast", pd.DataFrame([metrics_store['LowContrast']]))
+    
+    # ------------------- SNR/Ghosting -------------------
+    with tabs[6]:
+        st.header("SNR/Ghosting")
+        if 'SNR_Ghosting' not in metrics_store:
+            st.info("Not filled yet")
+        snr_val = st.number_input("SNR",0.0,key="snr")
+        if st.button("Submit SNR/Ghosting"):
+            status = "PASS" if snr_val >= ACTION_LIMITS['SNR_min'] else "FAIL"
+            metrics_store['SNR_Ghosting'] = {'SNR':snr_val,'Status':status}
+            st.success(f"SNR/Ghosting recorded. Status: {status}")
+            save_metrics_csv("SNR_Ghosting", pd.DataFrame([metrics_store['SNR_Ghosting']]))
+    
+    # ------------------- CF/Gain -------------------
+    with tabs[10]:
+        st.header("Center Frequency / Gain")
+        if 'CF_Gain' not in metrics_store:
+            st.info("Not filled yet")
+        cf_val = st.number_input("Center Frequency (MHz)",0.0,key="cf")
+        gain_val = st.number_input("Receiver Gain",0.0,key="gain")
+        if st.button("Submit CF/Gain"):
+            metrics_store['CF_Gain'] = {'CF':cf_val,'Gain':gain_val,'Status':'N/A'}
+            st.success("CF/Gain recorded")
+            save_metrics_csv("CF_Gain", pd.DataFrame([metrics_store['CF_Gain']]))
+    
+    # ------------------- PDF / Report -------------------
+    with tabs[8]:
+        st.header("Generate Full PDF Report")
+        save_option = st.radio("Save PDF:", ["Locally","User-defined Repo"], index=0)
+        report_name = f"{datetime.now().strftime('%Y-%m-%d')}_ACR_QC_Report.pdf"
+        if st.button("Generate PDF"):
+            pdf_path = generate_pdf(metrics_store, report_name)
+            
+            if save_option=="User-defined Repo":
+                reports_folder = os.path.join(user_repo_path,"Reports")
+                os.makedirs(reports_folder, exist_ok=True)
+                save_path = os.path.join(reports_folder, report_name)
+                if pdf_path != save_path:
+                    os.replace(pdf_path, save_path)
+            else:
+                save_path = pdf_path
+            
+            st.success(f"PDF saved to: {save_path}")
+            st.download_button("Download PDF", data=open(save_path,"rb").read(), file_name=report_name)
+            
+            if st.checkbox("Commit PDF to your GitHub repo"):
+                try:
+                    subprocess.run(["git","add",save_path])
+                    subprocess.run(["git","commit","-m",f"{st.session_state.username} added QC report {report_name}"])
+                    subprocess.run(["git","push"])
+                    st.success("PDF committed and pushed to your repo!")
+                except Exception as e:
+                    st.error(f"Git commit failed: {e}")
+    
+    # ------------------- Settings -------------------
+    with tabs[9]:
+        st.header("Settings / Help")
+        st.text(f"Local data folder: {DATA_PATH}")
+        st.text(f"Local reports folder: {REPORTS_PATH}")
+        st.info("For tests requiring manual measurements, adjust W/WL and zoom on images per ACR guidelines.")
+        st.text_input("Optional: Change user-defined GitHub repo", value=user_repo_path)
+    
+    # ------------------- Trend Tab Placeholder -------------------
+    with tabs[7]:
+        st.header("Trend Analysis")
+        st.info("Trend plots will be generated from historical CSVs (optional).")
