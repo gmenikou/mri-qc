@@ -5,7 +5,6 @@ from datetime import datetime
 from fpdf import FPDF
 import numpy as np
 import matplotlib.pyplot as plt
-import pydicom
 from skimage import filters, measure, morphology
 
 # ------------------- Settings -------------------
@@ -50,7 +49,7 @@ def save_metrics_csv(test_name, df):
     df.to_csv(path, index=False)
     return path
 
-def generate_pdf(metrics_dict, filename, save_dir):
+def generate_pdf(metrics_dict, images_dict, filename, save_dir):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     
@@ -81,7 +80,7 @@ def generate_pdf(metrics_dict, filename, save_dir):
             pdf.cell(0,6,f"{test}: Not performed", ln=True)
         pdf.set_text_color(0,0,0)
     
-    # Detailed per-test pages
+    # Detailed pages
     for test in ALL_TESTS:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 14)
@@ -94,6 +93,11 @@ def generate_pdf(metrics_dict, filename, save_dir):
                     pdf.cell(0, 6, f"{key}: {val}", ln=True)
             pdf.ln(2)
             pdf.cell(0,6,f"Status: {metrics_dict[test]['Status']}", ln=True)
+            # Add images if exist
+            if test in images_dict:
+                for img_path in images_dict[test]:
+                    pdf.add_page()
+                    pdf.image(img_path, w=180)
         else:
             pdf.set_text_color(255,0,0)
             pdf.multi_cell(0,6,"This test was not performed during this session.")
@@ -104,39 +108,33 @@ def generate_pdf(metrics_dict, filename, save_dir):
     pdf.output(path)
     return path
 
-# ------------------- B0 Functions -------------------
-def load_dual_echo_dicom(files):
-    datasets = [pydicom.dcmread(f) for f in files]
-    datasets.sort(key=lambda x: int(x.InstanceNumber))
-    te_values = np.array([float(ds.EchoTime) for ds in datasets])
-    unique_te = np.unique(te_values)
-    if len(unique_te) !=2:
-        st.error("Dual-TE DICOM stack required (2 unique TEs).")
-        return None,None,None
-    te1, te2 = unique_te
-    imgs_te1 = np.array([ds.pixel_array for ds in datasets if ds.EchoTime==te1])
-    imgs_te2 = np.array([ds.pixel_array for ds in datasets if ds.EchoTime==te2])
-    return imgs_te1, imgs_te2, (te1, te2)
-
-def phantom_mask(img, fraction=0.85):
-    thresh = filters.threshold_otsu(img)
-    bw = img>thresh
-    label = measure.label(bw)
-    props = measure.regionprops(label)
-    largest = max(props, key=lambda x:x.area)
-    mask = (label==largest.label)
-    radius = int(np.sqrt(largest.area/np.pi))
-    erode_radius = int(radius*(1-fraction))
-    from skimage.morphology import disk
-    mask = morphology.erosion(mask,disk(erode_radius))
+def phantom_mask(mag_img):
+    thresh = filters.threshold_otsu(mag_img)
+    bw = mag_img > thresh
+    bw = morphology.remove_small_holes(bw, area_threshold=500)
+    bw = morphology.remove_small_objects(bw, min_size=500)
+    # Keep 85% of largest object
+    labels = measure.label(bw)
+    props = measure.regionprops(labels)
+    if not props:
+        return bw.astype(bool)
+    largest = max(props, key=lambda x: x.area)
+    cy, cx = largest.centroid
+    radius = np.sqrt(largest.area/np.pi)*0.85
+    Y, X = np.ogrid[:mag_img.shape[0], :mag_img.shape[1]]
+    mask = (X-cx)**2 + (Y-cy)**2 <= radius**2
     return mask
 
-def compute_b0_ppm(img1, img2, te1, te2):
-    delta_te = (te2 - te1)/1000.0
-    img1, img2 = img1.astype(np.complex64), img2.astype(np.complex64)
-    phase_diff = np.angle(img2 / img1)
-    b0_ppm = phase_diff / (2*np.pi*delta_te) / 42.577e6 * 1e6
-    return b0_ppm
+def plot_b0_phase(ppm_map, mask, idx):
+    plt.figure(figsize=(5,5))
+    plt.imshow(ppm_map, cmap='RdBu_r')
+    plt.colorbar(label='ppm')
+    plt.contour(mask, colors='k', linewidths=0.5)
+    plt.title(f"Slice {idx+1}")
+    path = f"./ACR_QC_Data/B0_slice_{idx+1}.png"
+    plt.savefig(path, bbox_inches='tight')
+    plt.close()
+    return path
 
 # ------------------- Session State -------------------
 if 'authenticated' not in st.session_state:
@@ -145,9 +143,12 @@ if 'metrics_store' not in st.session_state:
     st.session_state.metrics_store = {}
 if 'user_repo_path' not in st.session_state:
     st.session_state.user_repo_path = "./ACR_QC_Repo"
+if 'b0_images' not in st.session_state:
+    st.session_state.b0_images = []
 
 metrics_store = st.session_state.metrics_store
 user_repo_path = st.session_state.user_repo_path
+b0_images = st.session_state.b0_images
 
 # ------------------- Authentication -------------------
 if not st.session_state.authenticated:
@@ -155,7 +156,7 @@ if not st.session_state.authenticated:
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     if st.button("Login"):
-        if check_password(username, password):
+        if check_password(username,password):
             st.session_state.authenticated = True
             st.session_state.username = username
             st.session_state.user_repo_path = USER_REPOS.get(username, "./ACR_QC_Repo")
@@ -168,60 +169,70 @@ if st.session_state.authenticated:
     st.sidebar.success(f"Logged in as {st.session_state.username}")
     user_repo_path = st.session_state.user_repo_path
     os.makedirs(user_repo_path, exist_ok=True)
+
     tabs = st.tabs([
         "B0 Homogeneity","Uniformity","HCR","Slice Thickness",
         "Distortion","Low-Contrast","SNR/Ghosting","Trend","PDF","Settings","CF/Gain"
     ])
 
-    # ------------------- B0 -------------------
+    # ------------------- B0 Homogeneity -------------------
     with tabs[0]:
-        st.header("B0 Field Homogeneity (30cm Sphere Phantom)")
-        dicoms = st.file_uploader("Upload dual-TE DICOM stack (all slices)", type=["dcm"], accept_multiple_files=True)
-        if st.button("Compute B0 Metrics"):
-            if not dicoms:
-                st.error("Please upload dual-TE DICOM stack before computing metrics.")
+        st.header("B0 Field Homogeneity (Dual-TE)")
+        st.info("Upload phase images from two echo times (TE1 and TE2) as .npy files. Each file: {'data': 2D array, 'TE': float}")
+
+        te1_files = st.file_uploader("TE1 phase images (.npy)", type=["npy"], accept_multiple_files=True, key="te1")
+        te2_files = st.file_uploader("TE2 phase images (.npy)", type=["npy"], accept_multiple_files=True, key="te2")
+
+        if st.button("Compute B0 Metrics", key="b0_dual_button"):
+            if not te1_files or not te2_files:
+                st.warning("Please upload both TE1 and TE2 phase images")
+            elif len(te1_files) != len(te2_files):
+                st.warning("Number of TE1 and TE2 images must match")
             else:
-                imgs1, imgs2, (te1, te2) = load_dual_echo_dicom(dicoms)
-                if imgs1 is not None:
-                    max_ppm_slices = []
-                    fig, axes = plt.subplots(1,len(imgs1), figsize=(3*len(imgs1),3))
-                    if len(imgs1)==1:
-                        axes=[axes]
-                    for i,(im1,im2,ax) in enumerate(zip(imgs1,imgs2,axes)):
-                        mask = phantom_mask(im1)
-                        b0_map = compute_b0_ppm(im1, im2, te1, te2)
-                        b0_masked = b0_map*mask
-                        max_ppm_slices.append(np.max(np.abs(b0_masked)))
-                        im = ax.imshow(b0_masked, cmap='jet')
-                        ax.set_title(f"Slice {i+1}")
-                        ax.axis('off')
-                        fig.colorbar(im, ax=ax, fraction=0.046)
-                    st.pyplot(fig)
-                    max_ppm = np.max(max_ppm_slices)
-                    metrics_store['B0'] = {'Max_ppm':max_ppm, 'Status':"PASS" if max_ppm <= ACTION_LIMITS['B0_ppm'] else "FAIL"}
-                    st.success(f"Max B0: {max_ppm:.3f} ppm, Status: {metrics_store['B0']['Status']}")
-                    save_metrics_csv("B0", pd.DataFrame([metrics_store['B0']]))
+                max_ppm_slices = []
+                slice_image_paths = []
+                for idx, (f1, f2) in enumerate(zip(te1_files, te2_files)):
+                    phase1 = np.load(f1, allow_pickle=True).item()
+                    phase2 = np.load(f2, allow_pickle=True).item()
+                    img1, TE1 = phase1['data'], phase1['TE']
+                    img2, TE2 = phase2['data'], phase2['TE']
+                    delta_TE = TE2 - TE1
+                    if delta_TE <= 0:
+                        st.error(f"Invalid TE difference for slice {idx+1}")
+                        continue
+                    dphi = img2 - img1
+                    ppm_map = (dphi / (2*np.pi*delta_TE))*1e6
+                    mask = phantom_mask(np.abs(img1))
+                    max_ppm = np.max(np.abs(ppm_map[mask]))
+                    max_ppm_slices.append(max_ppm)
+                    img_path = plot_b0_phase(ppm_map, mask, idx)
+                    slice_image_paths.append(img_path)
+
+                metrics_store['B0'] = {'Max_ppm_per_slice': max_ppm_slices,
+                                       'Status': 'PASS' if max(max_ppm_slices) <= ACTION_LIMITS['B0_ppm'] else 'FAIL'}
+                st.session_state.b0_images = slice_image_paths
+                st.success(f"Computed B0 metrics: {metrics_store['B0']}")
+                for img_path in slice_image_paths:
+                    st.image(img_path)
 
     # ------------------- Uniformity -------------------
     with tabs[1]:
         st.header("Image Uniformity (T1/T2)")
-        t1_val = st.number_input("T1 (%)",0.0,100.0,key="uni_t1")
-        t2_val = st.number_input("T2 (%)",0.0,100.0,key="uni_t2")
+        t1_val = st.number_input("T1 (%)", 0.0, 100.0, key="uni_t1")
+        t2_val = st.number_input("T2 (%)", 0.0, 100.0, key="uni_t2")
         if st.button("Submit Uniformity"):
             status = "PASS" if min(t1_val,t2_val) >= ACTION_LIMITS['Uniformity_percent'] else "FAIL"
             metrics_store['Uniformity'] = {'T1':t1_val,'T2':t2_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"Uniformity recorded. Status: {status}")
             save_metrics_csv("Uniformity", pd.DataFrame([metrics_store['Uniformity']]))
 
     # ------------------- HCR -------------------
     with tabs[2]:
-        st.header("High-Contrast Resolution")
+        st.header("High-Contrast Resolution (T1/T2)")
         hcr_val = st.number_input("Highest resolved line-pair (mm)",0.0,key="hcr")
         if st.button("Submit HCR"):
             status = "PASS" if hcr_val >= ACTION_LIMITS['HCR_lp'] else "FAIL"
             metrics_store['HCR'] = {'Resolved_lp':hcr_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"HCR recorded. Status: {status}")
             save_metrics_csv("HCR", pd.DataFrame([metrics_store['HCR']]))
 
@@ -232,7 +243,6 @@ if st.session_state.authenticated:
         if st.button("Submit Slice Thickness"):
             status = "PASS" if abs(st_val-5.0) <= ACTION_LIMITS['SliceThickness_mm'] else "FAIL"
             metrics_store['SliceThickness'] = {'Measured_mm':st_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"Slice Thickness recorded. Status: {status}")
             save_metrics_csv("SliceThickness", pd.DataFrame([metrics_store['SliceThickness']]))
 
@@ -243,7 +253,6 @@ if st.session_state.authenticated:
         if st.button("Submit Distortion"):
             status = "PASS" if dist_val <= ACTION_LIMITS['Distortion_mm'] else "FAIL"
             metrics_store['Distortion'] = {'MaxDistortion_mm':dist_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"Distortion recorded. Status: {status}")
             save_metrics_csv("Distortion", pd.DataFrame([metrics_store['Distortion']]))
 
@@ -254,7 +263,6 @@ if st.session_state.authenticated:
         if st.button("Submit Low Contrast"):
             status = "PASS" if lc_val >= ACTION_LIMITS['LowContrast_min'] else "FAIL"
             metrics_store['LowContrast'] = {'ObjectsVisible':lc_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"Low-Contrast recorded. Status: {status}")
             save_metrics_csv("LowContrast", pd.DataFrame([metrics_store['LowContrast']]))
 
@@ -265,52 +273,43 @@ if st.session_state.authenticated:
         if st.button("Submit SNR/Ghosting"):
             status = "PASS" if snr_val >= ACTION_LIMITS['SNR_min'] else "FAIL"
             metrics_store['SNR_Ghosting'] = {'SNR':snr_val,'Status':status}
-            st.session_state.metrics_store = metrics_store
             st.success(f"SNR/Ghosting recorded. Status: {status}")
             save_metrics_csv("SNR_Ghosting", pd.DataFrame([metrics_store['SNR_Ghosting']]))
 
     # ------------------- CF/Gain -------------------
     with tabs[10]:
         st.header("Center Frequency / Gain")
-        cf_val = st.number_input("Center Frequency (MHz)",0.0,key="cf")
-        gain_val = st.number_input("Receiver Gain",0.0,key="gain")
+        cf_val = st.number_input("Center Frequency (Hz)",0.0,key="cf")
+        gain_val = st.number_input("TX Gain / Attenuation (dB)",0.0,key="gain")
         if st.button("Submit CF/Gain"):
-            metrics_store['CF_Gain'] = {'CF':cf_val,'Gain':gain_val,'Status':'N/A'}
-            st.session_state.metrics_store = metrics_store
+            metrics_store['CF_Gain'] = {'CF_Hz':cf_val,'Gain_dB':gain_val,'Status':'N/A'}
             st.success("CF/Gain recorded")
             save_metrics_csv("CF_Gain", pd.DataFrame([metrics_store['CF_Gain']]))
 
-    # ------------------- Trend -------------------
-    with tabs[7]:
-        st.header("Trend Analysis")
-        st.info("Trend plots from historical CSVs (optional)")
-
-    # ------------------- PDF -------------------
+    # ------------------- PDF / Report -------------------
     with tabs[8]:
-        st.header("Generate Full PDF Report")
+        st.header("Generate PDF Report")
         save_option = st.radio("Save PDF:", ["Locally","User-defined Repo"], index=0)
         report_name = f"{datetime.now().strftime('%Y-%m-%d')}_ACR_QC_Report.pdf"
         if st.button("Generate PDF"):
             save_dir = REPORTS_PATH if save_option=="Locally" else os.path.join(user_repo_path,"Reports")
-            pdf_path = generate_pdf(metrics_store, report_name, save_dir)
+            images_dict = {'B0': st.session_state.b0_images}
+            pdf_path = generate_pdf(metrics_store, images_dict, report_name, save_dir)
             st.success(f"PDF saved to: {pdf_path}")
             st.download_button("Download PDF", data=open(pdf_path,"rb").read(), file_name=report_name)
-            if st.checkbox("Commit PDF to your GitHub repo"):
-                try:
-                    subprocess.run(["git","add",pdf_path], check=True)
-                    subprocess.run(["git","commit","-m",f"{st.session_state.username} added QC report {report_name}"], check=True)
-                    subprocess.run(["git","push"], check=True)
-                    st.success("PDF committed and pushed to your repo!")
-                except subprocess.CalledProcessError as e:
-                    st.error(f"Git commit failed: {e}")
 
     # ------------------- Settings -------------------
     with tabs[9]:
         st.header("Settings / Help")
         st.text(f"Local data folder: {DATA_PATH}")
         st.text(f"Local reports folder: {REPORTS_PATH}")
-        st.info("For tests requiring manual measurements, adjust W/WL and zoom on images per ACR guidelines.")
+        st.info("For tests requiring manual measurements, adjust W/WL and zoom per ACR guidelines.")
         new_repo = st.text_input("Optional: Change user-defined GitHub repo", value=user_repo_path)
         if new_repo != user_repo_path:
             st.session_state.user_repo_path = new_repo
             st.success(f"User repo path updated to: {new_repo}")
+
+    # ------------------- Trend Tab Placeholder -------------------
+    with tabs[7]:
+        st.header("Trend Analysis")
+        st.info("Trend plots will be generated from historical CSVs (optional).")
