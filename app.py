@@ -142,7 +142,7 @@ if st.session_state.authenticated:
 
     # ------------------- Example: B0 -------------------
     with tabs[0]:
-    st.header("B0 Field Homogeneity")
+        st.header("B0 Field Homogeneity")
     
     # Optional: upload DICOM stack
     t1_files = st.file_uploader(
