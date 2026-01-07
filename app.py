@@ -141,7 +141,7 @@ if st.session_state.authenticated:
     ])
 
     # ------------------- Example: B0 -------------------
-   with tabs[0]:
+    with tabs[0]:
         st.header("B0 Field Homogeneity")
         t1_files = st.file_uploader("Upload T1 DICOM stack", type=["dcm"], accept_multiple_files=True)
         if st.button("Compute B0 Metrics"):
