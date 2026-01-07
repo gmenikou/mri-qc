@@ -6,7 +6,7 @@ from fpdf import FPDF
 import numpy as np
 import matplotlib.pyplot as plt
 import pydicom
-from skimage import filters, measure, morphology, segmentation
+from skimage import filters, measure, morphology
 
 # ------------------- Settings -------------------
 DATA_PATH = "./ACR_QC_Data"
@@ -104,8 +104,8 @@ def generate_pdf(metrics_dict, filename, save_dir):
     pdf.output(path)
     return path
 
+# ------------------- B0 Functions -------------------
 def load_dual_echo_dicom(files):
-    """Load dual TE images and extract TE values"""
     datasets = [pydicom.dcmread(f) for f in files]
     datasets.sort(key=lambda x: int(x.InstanceNumber))
     te_values = np.array([float(ds.EchoTime) for ds in datasets])
@@ -114,35 +114,28 @@ def load_dual_echo_dicom(files):
         st.error("Dual-TE DICOM stack required (2 unique TEs).")
         return None,None,None
     te1, te2 = unique_te
-    # separate images per TE
     imgs_te1 = np.array([ds.pixel_array for ds in datasets if ds.EchoTime==te1])
     imgs_te2 = np.array([ds.pixel_array for ds in datasets if ds.EchoTime==te2])
     return imgs_te1, imgs_te2, (te1, te2)
 
 def phantom_mask(img, fraction=0.85):
-    """Create circular mask covering fraction of phantom"""
     thresh = filters.threshold_otsu(img)
     bw = img>thresh
-    # largest object = phantom
     label = measure.label(bw)
     props = measure.regionprops(label)
     largest = max(props, key=lambda x:x.area)
     mask = (label==largest.label)
-    # erode to fraction
-    from skimage.morphology import disk
     radius = int(np.sqrt(largest.area/np.pi))
     erode_radius = int(radius*(1-fraction))
-    selem = disk(erode_radius)
-    mask = morphology.erosion(mask,selem)
+    from skimage.morphology import disk
+    mask = morphology.erosion(mask,disk(erode_radius))
     return mask
 
 def compute_b0_ppm(img1, img2, te1, te2):
-    """Compute B0 map in ppm"""
-    delta_te = (te2 - te1)/1000.0  # ms to sec
+    delta_te = (te2 - te1)/1000.0
     img1, img2 = img1.astype(np.complex64), img2.astype(np.complex64)
-    # phase difference
     phase_diff = np.angle(img2 / img1)
-    b0_ppm = phase_diff / (2*np.pi*delta_te) / 42.577e6 * 1e6  # 42.577 MHz/T
+    b0_ppm = phase_diff / (2*np.pi*delta_te) / 42.577e6 * 1e6
     return b0_ppm
 
 # ------------------- Session State -------------------
@@ -161,8 +154,7 @@ if not st.session_state.authenticated:
     st.title("ACR QC Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-    login_clicked = st.button("Login")
-    if login_clicked:
+    if st.button("Login"):
         if check_password(username, password):
             st.session_state.authenticated = True
             st.session_state.username = username
@@ -181,7 +173,7 @@ if st.session_state.authenticated:
         "Distortion","Low-Contrast","SNR/Ghosting","Trend","PDF","Settings","CF/Gain"
     ])
 
-    # ------------------- B0 Homogeneity -------------------
+    # ------------------- B0 -------------------
     with tabs[0]:
         st.header("B0 Field Homogeneity (30cm Sphere Phantom)")
         dicoms = st.file_uploader("Upload dual-TE DICOM stack (all slices)", type=["dcm"], accept_multiple_files=True)
@@ -208,6 +200,7 @@ if st.session_state.authenticated:
                     max_ppm = np.max(max_ppm_slices)
                     metrics_store['B0'] = {'Max_ppm':max_ppm, 'Status':"PASS" if max_ppm <= ACTION_LIMITS['B0_ppm'] else "FAIL"}
                     st.success(f"Max B0: {max_ppm:.3f} ppm, Status: {metrics_store['B0']['Status']}")
+                    save_metrics_csv("B0", pd.DataFrame([metrics_store['B0']]))
 
     # ------------------- Uniformity -------------------
     with tabs[1]:
@@ -232,19 +225,67 @@ if st.session_state.authenticated:
             st.success(f"HCR recorded. Status: {status}")
             save_metrics_csv("HCR", pd.DataFrame([metrics_store['HCR']]))
 
-    # ------------------- Other tabs placeholders -------------------
-    for tab_name in ["Slice Thickness","Distortion","Low-Contrast","SNR/Ghosting","CF/Gain"]:
-        idx = ["Slice Thickness","Distortion","Low-Contrast","SNR/Ghosting","CF/Gain"].index(tab_name)+3
-        with tabs[idx]:
-            st.header(tab_name)
-            st.info("Input numeric results per ACR guidelines (placeholder)")
+    # ------------------- Slice Thickness -------------------
+    with tabs[3]:
+        st.header("Slice Thickness")
+        st_val = st.number_input("Measured slice thickness (mm)",0.0,key="slice_thick")
+        if st.button("Submit Slice Thickness"):
+            status = "PASS" if abs(st_val-5.0) <= ACTION_LIMITS['SliceThickness_mm'] else "FAIL"
+            metrics_store['SliceThickness'] = {'Measured_mm':st_val,'Status':status}
+            st.session_state.metrics_store = metrics_store
+            st.success(f"Slice Thickness recorded. Status: {status}")
+            save_metrics_csv("SliceThickness", pd.DataFrame([metrics_store['SliceThickness']]))
+
+    # ------------------- Distortion -------------------
+    with tabs[4]:
+        st.header("Geometric Distortion")
+        dist_val = st.number_input("Max distortion (mm)",0.0,key="distortion")
+        if st.button("Submit Distortion"):
+            status = "PASS" if dist_val <= ACTION_LIMITS['Distortion_mm'] else "FAIL"
+            metrics_store['Distortion'] = {'MaxDistortion_mm':dist_val,'Status':status}
+            st.session_state.metrics_store = metrics_store
+            st.success(f"Distortion recorded. Status: {status}")
+            save_metrics_csv("Distortion", pd.DataFrame([metrics_store['Distortion']]))
+
+    # ------------------- Low Contrast -------------------
+    with tabs[5]:
+        st.header("Low-Contrast Objects")
+        lc_val = st.number_input("Number of visible low-contrast objects",0,key="lowcontrast")
+        if st.button("Submit Low Contrast"):
+            status = "PASS" if lc_val >= ACTION_LIMITS['LowContrast_min'] else "FAIL"
+            metrics_store['LowContrast'] = {'ObjectsVisible':lc_val,'Status':status}
+            st.session_state.metrics_store = metrics_store
+            st.success(f"Low-Contrast recorded. Status: {status}")
+            save_metrics_csv("LowContrast", pd.DataFrame([metrics_store['LowContrast']]))
+
+    # ------------------- SNR/Ghosting -------------------
+    with tabs[6]:
+        st.header("SNR/Ghosting")
+        snr_val = st.number_input("SNR",0.0,key="snr")
+        if st.button("Submit SNR/Ghosting"):
+            status = "PASS" if snr_val >= ACTION_LIMITS['SNR_min'] else "FAIL"
+            metrics_store['SNR_Ghosting'] = {'SNR':snr_val,'Status':status}
+            st.session_state.metrics_store = metrics_store
+            st.success(f"SNR/Ghosting recorded. Status: {status}")
+            save_metrics_csv("SNR_Ghosting", pd.DataFrame([metrics_store['SNR_Ghosting']]))
+
+    # ------------------- CF/Gain -------------------
+    with tabs[10]:
+        st.header("Center Frequency / Gain")
+        cf_val = st.number_input("Center Frequency (MHz)",0.0,key="cf")
+        gain_val = st.number_input("Receiver Gain",0.0,key="gain")
+        if st.button("Submit CF/Gain"):
+            metrics_store['CF_Gain'] = {'CF':cf_val,'Gain':gain_val,'Status':'N/A'}
+            st.session_state.metrics_store = metrics_store
+            st.success("CF/Gain recorded")
+            save_metrics_csv("CF_Gain", pd.DataFrame([metrics_store['CF_Gain']]))
 
     # ------------------- Trend -------------------
     with tabs[7]:
         st.header("Trend Analysis")
         st.info("Trend plots from historical CSVs (optional)")
 
-    # ------------------- PDF Report -------------------
+    # ------------------- PDF -------------------
     with tabs[8]:
         st.header("Generate Full PDF Report")
         save_option = st.radio("Save PDF:", ["Locally","User-defined Repo"], index=0)
