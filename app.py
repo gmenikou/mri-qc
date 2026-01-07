@@ -141,16 +141,15 @@ if st.session_state.authenticated:
     ])
 
     # ------------------- Example: B0 -------------------
-    with tabs[0]:
-        st.header("B0 Field Homogeneity")
-        if 'B0' not in metrics_store:
-            st.info("Not filled yet")
-        else:
-            st.success(f"Current metrics: {metrics_store['B0']}")
-        if st.button("Compute B0 Metrics"):
-            metrics_store['B0'] = {'Mean_ppm':0.1,'SD_ppm':0.05,'PeakToPeak_ppm':0.12,'Status':'PASS'}
-            st.session_state.metrics_store = metrics_store
-            st.success(f"Computed B0 metrics: {metrics_store['B0']}")
+   with tabs[0]:
+    st.header("B0 Field Homogeneity")
+    t1_files = st.file_uploader("Upload T1 DICOM stack", type=["dcm"], accept_multiple_files=True)
+    if st.button("Compute B0 Metrics"):
+        metrics_store['B0'] = {
+            'Mean_ppm':0.1, 'SD_ppm':0.05, 'PeakToPeak_ppm':0.12,
+            'Status': "PASS" if 0.12 <= ACTION_LIMITS['B0_ppm'] else "FAIL"
+        }
+        st.success(f"Computed B0 metrics: {metrics_store['B0']}")
 
     # ------------------- Uniformity -------------------
     with tabs[1]:
